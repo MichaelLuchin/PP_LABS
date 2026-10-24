@@ -1,23 +1,22 @@
-cmake_minimum_required(VERSION 3.20)
-project(PP_LABS CXX)
+cmake_minimum_required(VERSION 3.10)
+project(PP_LABS LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 98)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS ON)
 
 find_package(OpenMP REQUIRED)
+find_package(MPI QUIET COMPONENTS CXX)
 
-# Настройка MPICH2
-set(MPICH2_DIR "C:/Program Files/MPICH2")
-include_directories("${MPICH2_DIR}/include")
-link_directories("${MPICH2_DIR}/lib")
+add_executable(lab2_omp main_omp.cpp)
+target_link_libraries(lab2_omp PRIVATE OpenMP::OpenMP_CXX)
+target_compile_options(lab2_omp PRIVATE ${OpenMP_CXX_FLAGS})
+target_link_options(lab2_omp PRIVATE ${OpenMP_CXX_FLAGS})
+target_link_libraries(lab2_omp PRIVATE gomp)
 
-# Сборка OpenMP
-add_executable(lab1_omp main_omp.cpp)
-
-# Явно задаем флаг -fopenmp для GCC
-target_compile_options(lab1_omp PRIVATE ${OpenMP_CXX_FLAGS})
-target_link_options(lab1_omp PRIVATE ${OpenMP_CXX_FLAGS})
-target_link_libraries(lab1_omp PRIVATE gomp)
-
-# Сборка MPI
-add_executable(lab1_mpi main_mpi.cpp)
-target_link_libraries(lab1_mpi PRIVATE mpi)
+if(MPI_CXX_FOUND)
+    add_executable(lab2_mpi main_mpi.cpp)
+    target_link_libraries(lab2_mpi PRIVATE MPI::MPI_CXX)
+else()
+    message(WARNING "MPI not found: lab2_mpi target is skipped. Install MPICH/OpenMPI to build the MPI program.")
+endif()
