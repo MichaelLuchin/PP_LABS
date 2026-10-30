@@ -6,4 +6,4 @@
 #SBATCH --output=lab2_mpi_8_%j.out
 
 export I_MPI_LIBRARY=/usr/lib64/slurm/mpi_pmi2.so
-srun --mpi=pmi2 ./lab2_mpi
+srun --mpi=pmi2 ../lab2_mpi

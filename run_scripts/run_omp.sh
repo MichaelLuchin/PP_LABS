@@ -5,4 +5,4 @@
 #SBATCH --mem=1gb
 #SBATCH --output=lab2_omp_%j.out
 
-./lab2_omp
+../lab2_omp
