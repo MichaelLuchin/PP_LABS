@@ -1,8 +1,8 @@
 #!/bin/bash
-#SBATCH --job-name=lab2_omp
-#SBATCH --time=00:30:00
+#SBATCH --job-name=lab3_omp
+#SBATCH --time=01:00:00
 #SBATCH --nodes=1 --ntasks-per-node=8
-#SBATCH --mem=1gb
-#SBATCH --output=lab2_omp_%j.out
+#SBATCH --mem=2gb
+#SBATCH --output=lab3_omp_%j.out
 
-../lab2_omp
+../lab3_omp

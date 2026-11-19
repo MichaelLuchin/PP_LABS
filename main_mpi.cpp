@@ -7,171 +7,194 @@
 #include <cstdlib>
 #include <ctime>
 
-const int N = 8400000;
 const int K = 5;
 const int Q = 20;
 const int RUNS = 20;
+const int N_MULTIPLE = 8400000;
+const int N_NON_MULTIPLE = 10009;
 
-int* createVector()
+struct Result
 {
-    int* v = new int[N];
-    for (int i = 0; i < N; ++i)
-        v[i] = std::rand() % 201 - 100;
-    return v;
-}
+    double tSeq, tScatter, tParallel;
+    bool ok;
+};
 
-double elapsedMaximum(double localElapsed, int rank)
+double maxTime(double local)
 {
     double maximum = 0.0;
-    MPI_Reduce(&localElapsed, &maximum, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
-    return rank == 0 ? maximum : 0.0;
+    MPI_Reduce(&local, &maximum, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+    return maximum;
+}
+
+void sumVectors(int** v, int* res, int n, int q)
+{
+    for (int i = 0; i < n; ++i)
+    {
+        int s = 0;
+        for (int r = 0; r < q; ++r)
+            for (int k = 0; k < K; ++k)
+                s += v[k][i];
+        res[i] = s;
+    }
+}
+
+void splitWork(int n, int procs, int* counts, int* displs)
+{
+    const int base = n / procs;
+    const int rest = n % procs;
+    int shift = 0;
+    for (int p = 0; p < procs; ++p)
+    {
+        counts[p] = base + (p < rest ? 1 : 0);
+        displs[p] = shift;
+        shift += counts[p];
+    }
+}
+
+Result measure(int n, int q, bool useV, int rank, int procs)
+{
+    int* counts = new int[procs];
+    int* displs = new int[procs];
+    splitWork(n, procs, counts, displs);
+    const int count = counts[rank];
+
+    int* full[K];
+    int* part[K];
+    int* resSeq = 0;
+    int* resPar = 0;
+    int* partRes = new int[count];
+
+    for (int k = 0; k < K; ++k)
+    {
+        full[k] = 0;
+        part[k] = new int[count];
+    }
+    if (rank == 0)
+    {
+        for (int k = 0; k < K; ++k)
+        {
+            full[k] = new int[n];
+            for (int i = 0; i < n; ++i)
+                full[k][i] = std::rand() % 201 - 100;
+        }
+        resSeq = new int[n];
+        resPar = new int[n];
+    }
+
+    Result res = {0.0, 0.0, 0.0, true};
+
+    for (int run = 0; run < RUNS; ++run)
+    {
+        MPI_Barrier(MPI_COMM_WORLD);
+        double start = MPI_Wtime();
+        if (rank == 0)
+        {
+            sumVectors(full, resSeq, n, q);
+            res.tSeq += MPI_Wtime() - start;
+        }
+
+        MPI_Barrier(MPI_COMM_WORLD);
+        start = MPI_Wtime();
+        for (int k = 0; k < K; ++k)
+        {
+            if (useV)
+                MPI_Scatterv(full[k], counts, displs, MPI_INT, part[k], count, MPI_INT, 0, MPI_COMM_WORLD);
+            else
+                MPI_Scatter(full[k], count, MPI_INT, part[k], count, MPI_INT, 0, MPI_COMM_WORLD);
+        }
+        res.tScatter += maxTime(MPI_Wtime() - start);
+
+        MPI_Barrier(MPI_COMM_WORLD);
+        start = MPI_Wtime();
+        sumVectors(part, partRes, count, q);
+        if (useV)
+            MPI_Gatherv(partRes, count, MPI_INT, resPar, counts, displs, MPI_INT, 0, MPI_COMM_WORLD);
+        else
+            MPI_Gather(partRes, count, MPI_INT, resPar, count, MPI_INT, 0, MPI_COMM_WORLD);
+        res.tParallel += maxTime(MPI_Wtime() - start);
+
+        if (rank == 0)
+        {
+            for (int i = 0; i < n; ++i)
+                if (resSeq[i] != resPar[i])
+                    res.ok = false;
+        }
+    }
+
+    res.tSeq /= RUNS;
+    res.tScatter /= RUNS;
+    res.tParallel /= RUNS;
+
+    for (int k = 0; k < K; ++k)
+    {
+        delete[] part[k];
+        delete[] full[k];
+    }
+    delete[] partRes;
+    delete[] resSeq;
+    delete[] resPar;
+    delete[] counts;
+    delete[] displs;
+    return res;
+}
+
+void printResult(const Result& r, int n, bool useV)
+{
+    const char* nSeq = useV ? "tSnon" : "tSmul";
+    const char* nScatter = useV ? "tScV " : "tSc  ";
+    const char* nPar = useV ? "tnon " : "tmul ";
+    const char* nAccel = useV ? "anonScV" : "amulSc";
+    const char* nAccelPure = useV ? "anon" : "amul";
+
+    std::cout << (useV ? "--- Размерность некратная, N = " : "--- Размерность кратная, N = ") << n << " ---\n"
+              << std::fixed << std::setprecision(9)
+              << "Среднее время, сек:\n"
+              << "  " << nSeq << " (последовательно): " << r.tSeq << "\n"
+              << "  " << nScatter << " (" << (useV ? "Scatterv" : "Scatter") << ", пять векторов): " << r.tScatter << "\n"
+              << "  " << nPar << " (счет + " << (useV ? "Gatherv" : "Gather") << "): " << r.tParallel << "\n"
+              << std::setprecision(4)
+              << "Ускорение с учетом рассылки " << nAccel << ": " << r.tSeq / (r.tScatter + r.tParallel) << "\n"
+              << "Ускорение без учета рассылки " << nAccelPure << ": " << r.tSeq / r.tParallel << "\n"
+              << "Результаты совпадают с последовательными: " << (r.ok ? "да" : "НЕТ") << "\n\n";
 }
 
 int main(int argc, char* argv[])
 {
     MPI_Init(&argc, &argv);
 
-    int rank = 0, processCount = 0;
+    int rank = 0, procs = 0;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &processCount);
+    MPI_Comm_size(MPI_COMM_WORLD, &procs);
 
     std::srand(static_cast<unsigned int>(std::time(0)));
 
-    int* v0 = (rank == 0) ? createVector() : new int[N];
-    int* v1 = (rank == 0) ? createVector() : new int[N];
-    int* v2 = (rank == 0) ? createVector() : new int[N];
-    int* v3 = (rank == 0) ? createVector() : new int[N];
-    int* v4 = (rank == 0) ? createVector() : new int[N];
-
     if (rank == 0)
     {
-        std::cout << "Лабораторная работа 2: MPI\n"
+        std::cout << "Лабораторная работа 3: MPI\n"
                   << "Тип элементов: int\nK = " << K
-                  << "\nN = " << N << "\nQ = " << Q
-                  << "\nКоличество процессов в этом запуске: " << processCount
+                  << "\nN (кратная) = " << N_MULTIPLE
+                  << "\nN (некратная) = " << N_NON_MULTIPLE
+                  << "\nQ = " << Q
+                  << "\nКоличество процессов в этом запуске: " << procs
                   << "\nЧисло запусков усреднения: " << RUNS << "\n\n";
     }
 
-    const int block = N / processCount;
-    const int begin = block * rank;
-    int end = block * (rank + 1);
-    if (rank == processCount - 1)
-        end = N;
-
-    double tSeq = 0.0, tBcast = 0.0, tPointToPoint = 0.0, tReduce = 0.0;
-    double seqSum = 0, pointSum = 0, reduceSum = 0;
-
-    for (int run = 0; run < RUNS; ++run)
+    const int qValues[] = {1, Q};
+    for (int qi = 0; qi < 2; ++qi)
     {
-        MPI_Barrier(MPI_COMM_WORLD);
-        double start = MPI_Wtime();
-        double localSeq = 0;
+        const int q = qValues[qi];
         if (rank == 0)
-        {
-            for (int i = 0; i < N; ++i)
-                for (int q = 0; q < Q; ++q)
-                    localSeq += v0[i] + v1[i] + v2[i] + v3[i] + v4[i];
-        }
-        double seqElapsed = (rank == 0) ? MPI_Wtime() - start : 0.0;
-        MPI_Barrier(MPI_COMM_WORLD);
-        double maxElapsed = elapsedMaximum(seqElapsed, rank);
-        if (rank == 0)
-        {
-            tSeq += maxElapsed;
-            seqSum = localSeq;
-        }
+            std::cout << "========== Процессов: " << procs << ", Q = " << q << " ==========\n";
 
-        MPI_Barrier(MPI_COMM_WORLD);
-        start = MPI_Wtime();
-        MPI_Bcast(v0, N, MPI_INT, 0, MPI_COMM_WORLD);
-        MPI_Bcast(v1, N, MPI_INT, 0, MPI_COMM_WORLD);
-        MPI_Bcast(v2, N, MPI_INT, 0, MPI_COMM_WORLD);
-        MPI_Bcast(v3, N, MPI_INT, 0, MPI_COMM_WORLD);
-        MPI_Bcast(v4, N, MPI_INT, 0, MPI_COMM_WORLD);
-        MPI_Barrier(MPI_COMM_WORLD);
-        maxElapsed = elapsedMaximum(MPI_Wtime() - start, rank);
-        if (rank == 0)
-            tBcast += maxElapsed;
+        Result mul = measure(N_MULTIPLE, q, false, rank, procs);
+        Result non = measure(N_NON_MULTIPLE, q, true, rank, procs);
 
-        double localSum = 0;
-        MPI_Barrier(MPI_COMM_WORLD);
-        start = MPI_Wtime();
-        for (int i = begin; i < end; ++i)
-            for (int q = 0; q < Q; ++q)
-                localSum += v0[i] + v1[i] + v2[i] + v3[i] + v4[i];
-
-        double totalPoint = 0;
         if (rank == 0)
         {
-            totalPoint = localSum;
-            for (int source = 1; source < processCount; ++source)
-            {
-                double received = 0;
-                MPI_Status status;
-                MPI_Recv(&received, 1, MPI_DOUBLE, source, 10, MPI_COMM_WORLD, &status);
-                totalPoint += received;
-            }
-        }
-        else
-        {
-            MPI_Send(&localSum, 1, MPI_DOUBLE, 0, 10, MPI_COMM_WORLD);
-        }
-        MPI_Barrier(MPI_COMM_WORLD);
-        maxElapsed = elapsedMaximum(MPI_Wtime() - start, rank);
-        if (rank == 0)
-        {
-            tPointToPoint += maxElapsed;
-            pointSum = totalPoint;
-        }
-
-        localSum = 0;
-        double totalReduce = 0;
-        MPI_Barrier(MPI_COMM_WORLD);
-        start = MPI_Wtime();
-        for (int i = begin; i < end; ++i)
-            for (int q = 0; q < Q; ++q)
-                localSum += v0[i] + v1[i] + v2[i] + v3[i] + v4[i];
-        MPI_Reduce(&localSum, &totalReduce, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
-        MPI_Barrier(MPI_COMM_WORLD);
-        maxElapsed = elapsedMaximum(MPI_Wtime() - start, rank);
-        if (rank == 0)
-        {
-            tReduce += maxElapsed;
-            reduceSum = totalReduce;
+            printResult(mul, N_MULTIPLE, false);
+            printResult(non, N_NON_MULTIPLE, true);
         }
     }
-
-    if (rank == 0)
-    {
-        tSeq /= RUNS;
-        tBcast /= RUNS;
-        tPointToPoint /= RUNS;
-        tReduce /= RUNS;
-
-        std::cout << std::fixed << std::setprecision(6)
-                  << "Среднее время, сек:\n"
-                  << "  Последовательно: " << tSeq << "\n"
-                  << "  Bcast (пять векторов): " << tBcast << "\n"
-                  << "  Point-to-point (с локальным расчетом и сбором): " << tPointToPoint << "\n"
-                  << "  MPI_Reduce (с локальным расчетом и сбором): " << tReduce << "\n"
-                  << std::setprecision(4)
-                  << "Ускорение с Bcast:\n"
-                  << "  Point-to-point: " << tSeq / (tPointToPoint + tBcast) << "\n"
-                  << "  MPI_Reduce: " << tSeq / (tReduce + tBcast) << "\n"
-                  << "Ускорение без Bcast:\n"
-                  << "  Point-to-point: " << tSeq / tPointToPoint << "\n"
-                  << "  MPI_Reduce: " << tSeq / tReduce << "\n"
-                  << "Контроль сумм (последовательная / point-to-point / MPI_Reduce):\n"
-                  << std::setprecision(0) << seqSum << " / " << pointSum << " / " << reduceSum << "\n" << std::setprecision(4)
-                  << "Результаты совпадают: "
-                  << ((seqSum == pointSum && seqSum == reduceSum) ? "да" : "НЕТ") << "\n";
-    }
-
-    delete[] v0;
-    delete[] v1;
-    delete[] v2;
-    delete[] v3;
-    delete[] v4;
 
     MPI_Finalize();
     return 0;

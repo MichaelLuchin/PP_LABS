@@ -11,7 +11,13 @@ const int N = 8400000;
 const int K = 5;
 const int Q = 20;
 const int RUNS = 20;
+const int CHUNK = 100;
 const int THREAD_COUNTS[] = {2, 4, 8};
+
+struct Times
+{
+    double seq, init, st, dyn, gd;
+};
 
 int* createVector()
 {
@@ -21,122 +27,166 @@ int* createVector()
     return v;
 }
 
+void sumSequential(int** v, int* res, int q)
+{
+    for (int i = 0; i < N; ++i)
+    {
+        int s = 0;
+        for (int r = 0; r < q; ++r)
+            for (int k = 0; k < K; ++k)
+                s += v[k][i];
+        res[i] = s;
+    }
+}
+
+void sumStatic(int** v, int* res, int q)
+{
+    #pragma omp parallel
+    {
+        #pragma omp for schedule(static, CHUNK)
+        for (int i = 0; i < N; ++i)
+        {
+            int s = 0;
+            for (int r = 0; r < q; ++r)
+                for (int k = 0; k < K; ++k)
+                    s += v[k][i];
+            res[i] = s;
+        }
+    }
+}
+
+void sumDynamic(int** v, int* res, int q)
+{
+    #pragma omp parallel
+    {
+        #pragma omp for schedule(dynamic, CHUNK)
+        for (int i = 0; i < N; ++i)
+        {
+            int s = 0;
+            for (int r = 0; r < q; ++r)
+                for (int k = 0; k < K; ++k)
+                    s += v[k][i];
+            res[i] = s;
+        }
+    }
+}
+
+void sumGuided(int** v, int* res, int q)
+{
+    #pragma omp parallel
+    {
+        #pragma omp for schedule(guided, CHUNK)
+        for (int i = 0; i < N; ++i)
+        {
+            int s = 0;
+            for (int r = 0; r < q; ++r)
+                for (int k = 0; k < K; ++k)
+                    s += v[k][i];
+            res[i] = s;
+        }
+    }
+}
+
+bool sameResult(const int* a, const int* b)
+{
+    for (int i = 0; i < N; ++i)
+        if (a[i] != b[i])
+            return false;
+    return true;
+}
+
+void printTimes(int threads, int q, const Times& t, bool ok)
+{
+    std::cout << "========== Потоков: " << threads << ", Q = " << q << " ==========\n"
+              << std::fixed << std::setprecision(6)
+              << "Среднее время, сек:\n"
+              << "  tSmul (последовательно): " << t.seq << "\n"
+              << "  tp    (инициализация parallel): " << t.init << "\n"
+              << "  tst   (schedule static): " << t.st << "\n"
+              << "  td    (schedule dynamic): " << t.dyn << "\n"
+              << "  tg    (schedule guided): " << t.gd << "\n"
+              << std::setprecision(4)
+              << "Ускорение с учетом инициализации parallel:\n"
+              << "  astp: " << t.seq / (t.st + t.init) << "\n"
+              << "  adp:  " << t.seq / (t.dyn + t.init) << "\n"
+              << "  agp:  " << t.seq / (t.gd + t.init) << "\n"
+              << "Ускорение без учета инициализации parallel:\n"
+              << "  ast: " << t.seq / t.st << "\n"
+              << "  ad:  " << t.seq / t.dyn << "\n"
+              << "  ag:  " << t.seq / t.gd << "\n"
+              << "Результаты совпадают с последовательными: " << (ok ? "да" : "НЕТ") << "\n\n";
+}
+
 int main()
 {
     std::srand(static_cast<unsigned int>(std::time(0)));
 
-    int* v0 = createVector();
-    int* v1 = createVector();
-    int* v2 = createVector();
-    int* v3 = createVector();
-    int* v4 = createVector();
+    int* v[K];
+    for (int k = 0; k < K; ++k)
+        v[k] = createVector();
+    int* resSeq = new int[N];
+    int* resPar = new int[N];
 
-    std::cout << "Лабораторная работа 2: OpenMP\n"
+    std::cout << "Лабораторная работа 3: OpenMP\n"
               << "Тип элементов: int\nK = " << K
               << "\nN = " << N << "\nQ = " << Q
               << "\nКоличество потоков: [2, 4, 8]"
+              << "\nchunk = " << CHUNK
               << "\nЧисло запусков усреднения: " << RUNS << "\n\n";
 
-    for (int cfg = 0; cfg < 3; ++cfg)
+    const int qValues[] = {1, Q};
+    for (int qi = 0; qi < 2; ++qi)
     {
-        const int threads = THREAD_COUNTS[cfg];
-        omp_set_num_threads(threads);
-
-        double tSeq = 0.0, tInit = 0.0;
-        double tCritical = 0.0, tAtomic = 0.0, tReduction = 0.0;
-        long double seqSum = 0, criticalSum = 0, atomicSum = 0, reductionSum = 0;
-
-        for (int run = 0; run < RUNS; ++run)
+        const int q = qValues[qi];
+        for (int ti = 0; ti < 3; ++ti)
         {
-            long double sum = 0;
-            double start = omp_get_wtime();
-            for (int i = 0; i < N; ++i)
-                for (int q = 0; q < Q; ++q)
-                    sum += v0[i] + v1[i] + v2[i] + v3[i] + v4[i];
-            tSeq += omp_get_wtime() - start;
-            seqSum = sum;
+            const int threads = THREAD_COUNTS[ti];
+            omp_set_num_threads(threads);
 
-            start = omp_get_wtime();
-            #pragma omp parallel
-            {
-            }
-            tInit += omp_get_wtime() - start;
+            Times t = {0.0, 0.0, 0.0, 0.0, 0.0};
+            bool ok = true;
 
-            long double sumCritical = 0;
-            start = omp_get_wtime();
-            #pragma omp parallel for
-            for (int i = 0; i < N; ++i)
+            for (int run = 0; run < RUNS; ++run)
             {
-                for (int q = 0; q < Q; ++q)
+                double start = omp_get_wtime();
+                sumSequential(v, resSeq, q);
+                t.seq += omp_get_wtime() - start;
+
+                start = omp_get_wtime();
+                #pragma omp parallel
                 {
-                    #pragma omp critical
-                    sumCritical += v0[i] + v1[i] + v2[i] + v3[i] + v4[i];
                 }
-            }
-            tCritical += omp_get_wtime() - start;
-            criticalSum = sumCritical;
+                t.init += omp_get_wtime() - start;
 
-            long double sumAtomic = 0;
-            start = omp_get_wtime();
-            #pragma omp parallel for
-            for (int i = 0; i < N; ++i)
-            {
-                for (int q = 0; q < Q; ++q)
-                {
-                    #pragma omp atomic
-                    sumAtomic += v0[i] + v1[i] + v2[i] + v3[i] + v4[i];
-                }
-            }
-            tAtomic += omp_get_wtime() - start;
-            atomicSum = sumAtomic;
+                start = omp_get_wtime();
+                sumStatic(v, resPar, q);
+                t.st += omp_get_wtime() - start;
+                ok = ok && sameResult(resSeq, resPar);
 
-            long double sumReduction = 0;
-            start = omp_get_wtime();
-            #pragma omp parallel for reduction(+:sumReduction)
-            for (int i = 0; i < N; ++i)
-            {
-                for (int q = 0; q < Q; ++q)
-                    sumReduction += v0[i] + v1[i] + v2[i] + v3[i] + v4[i];
+                start = omp_get_wtime();
+                sumDynamic(v, resPar, q);
+                t.dyn += omp_get_wtime() - start;
+                ok = ok && sameResult(resSeq, resPar);
+
+                start = omp_get_wtime();
+                sumGuided(v, resPar, q);
+                t.gd += omp_get_wtime() - start;
+                ok = ok && sameResult(resSeq, resPar);
             }
-            tReduction += omp_get_wtime() - start;
-            reductionSum = sumReduction;
+
+            t.seq /= RUNS;
+            t.init /= RUNS;
+            t.st /= RUNS;
+            t.dyn /= RUNS;
+            t.gd /= RUNS;
+
+            printTimes(threads, q, t, ok);
         }
-
-        tSeq /= RUNS;
-        tInit /= RUNS;
-        tCritical /= RUNS;
-        tAtomic /= RUNS;
-        tReduction /= RUNS;
-
-        std::cout << "========== Потоков: " << threads << " ==========\n"
-                  << std::fixed << std::setprecision(6)
-                  << "Среднее время, сек:\n"
-                  << "  Последовательно: " << tSeq << "\n"
-                  << "  Инициализация parallel: " << tInit << "\n"
-                  << "  critical: " << tCritical << "\n"
-                  << "  atomic: " << tAtomic << "\n"
-                  << "  reduction: " << tReduction << "\n"
-                  << std::setprecision(4)
-                  << "Ускорение с инициализацией:\n"
-                  << "  critical: " << tSeq / (tCritical + tInit) << "\n"
-                  << "  atomic: " << tSeq / (tAtomic + tInit) << "\n"
-                  << "  reduction: " << tSeq / (tReduction + tInit) << "\n"
-                  << "Ускорение без инициализации:\n"
-                  << "  critical: " << tSeq / tCritical << "\n"
-                  << "  atomic: " << tSeq / tAtomic << "\n"
-                  << "  reduction: " << tSeq / tReduction << "\n"
-                  << "Контроль сумм (последовательная / critical / atomic / reduction):\n"
-                  << std::setprecision(0) << seqSum << " / " << criticalSum << " / " << atomicSum << " / " << reductionSum << "\n"
-                  << std::setprecision(4)
-                  << "Результаты совпадают: "
-                  << ((seqSum == criticalSum && seqSum == atomicSum && seqSum == reductionSum) ? "да" : "НЕТ")
-                  << "\n\n";
     }
 
-    delete[] v0;
-    delete[] v1;
-    delete[] v2;
-    delete[] v3;
-    delete[] v4;
+    for (int k = 0; k < K; ++k)
+        delete[] v[k];
+    delete[] resSeq;
+    delete[] resPar;
     return 0;
 }
